@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>3D Game — One‑File Demo (Three.js)</title>
+  <style>
+    html,body{margin:0;height:100%;overflow:hidden;background:#000;font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif}
+    canvas{display:block}
+    #overlay{
+      position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+      background:radial-gradient(1200px 600px at 50% 30%, #1a2344 0, #0a0f1f 60%, #000 100%);
+      color:#cfe4ff; text-align:center; padding:24px; gap:18px; flex-direction:column
+    }
+    #overlay button{
+      font-size:16px; padding:12px 18px; border:1px solid #6fa8ff; border-radius:8px;
+      background:#0c1b34; color:#cfe4ff; cursor:pointer
+    }
+    #hud{
+      position:fixed; left:12px; top:10px; color:#e9f2ff; font-size:14px;
+      text-shadow:0 1px 4px rgba(0,0,0,.6); user-select:none
+    }
+    #hud .stat{display:inline-block; margin-right:16px}
+    #crosshair{
+      position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+      font-weight:700; color:#ffffff; opacity:.75; user-select:none; pointer-events:none
+    }
+    #message{
+      position:fixed; left:50%; bottom:28px; transform:translateX(-50%);
+      color:#cfe4ff; font-size:14px; opacity:.85; user-select:none
+    }
+    #toast{
+      position:fixed; right:12px; top:10px; color:#ffe6a8; font-size:13px; opacity:.9;
+      text-shadow:0 1px 4px rgba(0,0,0,.6);
+    }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <h1 style="margin:0;font-weight:700;letter-spacing:.5px">3D WebGL Demo</h1>
+    <div>Кликните «Играть», затем — мышь + WASD. Соберите все кристаллы, избегайте врага.</div>
+    <button id="play">Играть</button>
+    <div style="opacity:.75;font-size:12px">Совет: откройте файл через локальный сервер (http://), а не как file://</div>
+  </div>
+  <div id="hud">
+    <span class="stat">FPS: <b id="fps">0</b></span>
+    <span class="stat">Кристаллы: <b id="score">0</b>/<b id="total">0</b></span>
+    <span class="stat">HP: <b id="hp">100</b></span>
+  </div>
+  <div id="crosshair">+</div>
+  <div id="message"></div>
+  <div id="toast"></div>
+
+  <script type="module">
+  import * as THREE from 'https://unpkg.com/three@0.158.0/build/three.module.js';
+  import { PointerLockControls } from 'https://unpkg.com/three@0.158.0/examples/jsm/controls/PointerLockControls.js';
+  import { ImprovedNoise } from 'https://unpkg.com/three@0.158.0/examples/jsm/math/ImprovedNoise.js';
+  import { EffectComposer } from 'https://unpkg.com/three@0.158.0/examples/jsm/postprocessing/EffectComposer.js';
+  import { RenderPass } from 'https://unpkg.com/three@0.158.0/examples/jsm/postprocessing/RenderPass.js';
+  import { UnrealBloomPass } from 'https://unpkg.com/three@0.158.0/examples/jsm/postprocessing/UnrealBloomPass.js';
+
+  // ----- базовая инициализация -----
+  const renderer = new THREE.WebGLRenderer({ antialias:true, powerPreference:'high-performance' });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.1;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  document.body.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x7aa0ff, 0.0022);
+
+  const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1200);
+  camera.position.set(0, 10, 10);
+
+  // Небо (градиентный шейдер)
+  {
+    const skyGeo = new THREE.SphereGeometry(1500, 32, 16);
+    skyGeo.scale(-1, 1, 1);
+    const skyMat = new THREE.ShaderMaterial({
+      uniforms: {
+        topColor: { value: new THREE.Color(0x6fb6ff) },
+        bottomColor: { value: new THREE.Color(0x0b1022) },
+        offset: { value: 400 },
+        exponent: { value: 0.9 }
+      },
+      vertexShader: `
+        varying vec3 vWorldPosition;
+        void main(){
+          vec4 wp = modelMatrix * vec4(position,1.0);
+          vWorldPosition = wp.xyz;
+          gl_Position = projectionMatrix * viewMatrix * wp;
+        }`,
+      fragmentShader: `
+        varying vec3 vWorldPosition;
+        uniform vec3 topColor; uniform vec3 bottomColor;
+        uniform float offset; uniform float exponent;
+        void main(){
+          float h = normalize(vWorldPosition + vec3(0.0, offset, 0.0)).y;
+          float f = max(pow(max(h, 0.0), exponent), 0.0);
+          gl_FragColor = vec4(mix(bottomColor, topColor, f), 1.0);
+        }`,
+      side: THREE.BackSide, depthWrite:false
+    });
+    scene.add(new THREE.Mesh(skyGeo, skyMat));
+  }
+
+  // Свет
+  const hemi = new THREE.HemisphereLight(0xb9deff, 0x203040, 0.6);
+  scene.add(hemi);
+
+  const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+  sun.position.set(200, 300, 100);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.camera.near = 10;
+  sun.shadow.camera.far = 800;
+  sun.shadow.camera.left = -300;
+  sun.shadow.camera.right = 300;
+  sun.shadow.camera.top = 300;
+  sun.shadow.camera.bottom = -300;
+  scene.add(sun);
+
+  // Процедурный рельеф
+  const WORLD_SIZE = 700;
+  const SEGMENTS = 256;
+  const EYE_HEIGHT = 3.2;
+  const noise = new ImprovedNoise();
+  const seed = Math.random() * 1000;
+
+  function fbm(x,z){
+    // Fractal Brownian Motion
+    let total=0, amp=1, freq=0.0022, norm=0;
+    for(let i=0;i<6;i++){
+      total += noise.noise(x*freq + seed, 0.0, z*freq + seed) * amp;
+      norm += amp;
+      amp *= 0.5;
+      freq *= 2.0;
+    }
+    return total / norm;
+  }
+  function getHeight(x,z){ return fbm(x,z) * 28; }
+
+  const terrainGeo = new THREE.PlaneGeometry(WORLD_SIZE, WORLD_SIZE, SEGMENTS, SEGMENTS);
+  terrainGeo.rotateX(-Math.PI/2);
+  const pos = terrainGeo.attributes.position;
+  for(let i=0;i<pos.count;i++){
+    const x = pos.getX(i), z = pos.getZ(i);
+    pos.setY(i, getHeight(x, z));
+  }
+  terrainGeo.computeVertexNormals();
+
+  const terrainMat = new THREE.MeshStandardMaterial({
+    color: 0x6a936c, roughness: 0.95, metalness: 0.02,
+    envMapIntensity: 0.4
+  });
+  const terrain = new THREE.Mesh(terrainGeo, terrainMat);
+  terrain.receiveShadow = true;
+  scene.add(terrain);
+
+  // Камни
+  const rockMat = new THREE.MeshStandardMaterial({ color:0x7f7f7f, roughness:1.0, metalness:0.0 });
+  const obstacles = [];
+  function addRock(x,z, r=2+Math.random()*4){
+    const g = new THREE.IcosahedronGeometry(r, 1);
+    const m = new THREE.Mesh(g, rockMat);
+    const y = getHeight(x,z) + r*0.6;
+    m.position.set(x,y,z);
+    m.castShadow = true; m.receiveShadow=true;
+    scene.add(m);
+    obstacles.push({ mesh:m, radius:r*0.9 });
+  }
+  for(let i=0;i<28;i++){
+    const x = (Math.random()*2-1)*(WORLD_SIZE*0.45);
+    const z = (Math.random()*2-1)*(WORLD_SIZE*0.45);
+    addRock(x,z);
+  }
+
+  // Кристаллы (цели для сбора)
+  const crystals = [];
+  const totalCrystals = 12;
+  document.getElementById('total').textContent = String(totalCrystals);
+
+  function addCrystal(x,z){
+    const y = getHeight(x,z) + 1.2;
+    const g = new THREE.OctahedronGeometry(0.9, 0);
+    const m = new THREE.MeshStandardMaterial({
+      color:0x44ffd1, emissive:0x44ffd1, emissiveIntensity:2.5, roughness:0.3, metalness:0.0
+    });
+    const mesh = new THREE.Mesh(g, m);
+    mesh.position.set(x,y,z);
+    mesh.castShadow = true;
+    scene.add(mesh);
+    crystals.push(mesh);
+  }
+  for(let i=0;i<totalCrystals;i++){
+    const x = (Math.random()*2-1)*(WORLD_SIZE*0.42);
+    const z = (Math.random()*2-1)*(WORLD_SIZE*0.42);
+    addCrystal(x,z);
+  }
+
+  // Простой враг
+  const enemyMat = new THREE.MeshStandardMaterial({ color:0xff4d4d, emissive:0x8a1010, emissiveIntensity:1.6, roughness:0.6 });
+  const enemy = new THREE.Mesh(new THREE.SphereGeometry(1.6, 32, 16), enemyMat);
+  enemy.castShadow = true;
+  scene.add(enemy);
+  let enemyT = 0;
+
+  // Управление от первого лица (Pointer Lock)
+  const controls = new PointerLockControls(camera, document.body);
+  const overlay = document.getElementById('overlay');
+  document.getElementById('play').addEventListener('click', () => controls.lock());
+  controls.addEventListener('lock', () => overlay.style.display='none');
+  controls.addEventListener('unlock', () => overlay.style.display='flex');
+
+  // Движение
+  const keys = { w:false, a:false, s:false, d:false };
+  window.addEventListener('keydown', (e)=>{
+    if(e.code==='KeyW') keys.w=true;
+    if(e.code==='KeyA') keys.a=true;
+    if(e.code==='KeyS') keys.s=true;
+    if(e.code==='KeyD') keys.d=true;
+    if(e.code==='KeyQ') { bloomEnabled = !bloomEnabled; toast(bloomEnabled?'Bloom: ON':'Bloom: OFF'); }
+  });
+  window.addEventListener('keyup', (e)=>{
+    if(e.code==='KeyW') keys.w=false;
+    if(e.code==='KeyA') keys.a=false;
+    if(e.code==='KeyS') keys.s=false;
+    if(e.code==='KeyD') keys.d=false;
+  });
+
+  // Пост‑обработка (Bloom)
+  const composer = new EffectComposer(renderer);
+  const renderPass = new RenderPass(scene, camera);
+  const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.6, 0.4, 0.85);
+  composer.addPass(renderPass);
+  composer.addPass(bloomPass);
+  let bloomEnabled = true;
+
+  // Статусы/вспомогательные
+  const fpsEl = document.getElementById('fps');
+  const scoreEl = document.getElementById('score');
+  const hpEl = document.getElementById('hp');
+  const msgEl = document.getElementById('message');
+  const toastEl = document.getElementById('toast');
+
+  let score = 0;
+  let hp = 100;
+  let lastFpsUpdate = 0;
+  const clock = new THREE.Clock();
+  const up = new THREE.Vector3(0,1,0);
+  const tmpForward = new THREE.Vector3();
+  const tmpRight = new THREE.Vector3();
+  const nextPos = new THREE.Vector3();
+
+  // стартовая позиция игрока
+  controls.getObject().position.set(0, getHeight(0,0)+EYE_HEIGHT, 24);
+
+  function clampToWorld(p){
+    const half = WORLD_SIZE*0.5 - 2;
+    p.x = Math.max(-half, Math.min(half, p.x));
+    p.z = Math.max(-half, Math.min(half, p.z));
+  }
+
+  function collideSpheres(p, r){
+    for(const o of obstacles){
+      const d = p.distanceTo(o.mesh.position);
+      if(d < (r + o.radius)){
+        // отталкивание
+        const dir = p.clone().sub(o.mesh.position).setY(0).normalize().multiplyScalar((r+o.radius)-d);
+        p.add(dir);
+      }
+    }
+  }
+
+  function updateEnemy(dt){
+    enemyT += dt * 0.35;
+    const R = 120, speed = 0.2;
+    const ex = Math.cos(enemyT)*R, ez = Math.sin(enemyT*1.3)*R;
+    const jitter = Math.sin(enemyT*4.0)*8.0;
+    const x = ex + jitter, z = ez - jitter*0.5;
+    enemy.position.set(x, getHeight(x,z)+1.6, z);
+
+    // столкновение с игроком
+    const playerPos = controls.getObject().position;
+    const dist = playerPos.distanceTo(enemy.position);
+    if(dist < 2.6){
+      hp = Math.max(0, hp - 15);
+      hpEl.textContent = String(hp);
+      // небольшой нокбэк
+      const push = playerPos.clone().sub(enemy.position).setY(0).normalize().multiplyScalar(3.5);
+      nextPos.copy(playerPos).add(push);
+      clampToWorld(nextPos);
+      const h = getHeight(nextPos.x, nextPos.z);
+      nextPos.y = h + EYE_HEIGHT;
+      controls.getObject().position.copy(nextPos);
+      if(hp<=0){ gameOver(); }
+    }
+  }
+
+  function toast(text){
+    toastEl.textContent = text;
+    toastEl.style.opacity = '0.95';
+    clearTimeout(toast._t);
+    toast._t = setTimeout(()=>toastEl.style.opacity='0', 1200);
+  }
+
+  function gameOver(){
+    msgEl.textContent = 'Вы пали... Обновите страницу для рестарта';
+    renderer.setAnimationLoop(null);
+  }
+
+  function youWin(){
+    msgEl.textContent = 'Победа! Все кристаллы собраны 🎉';
+  }
+
+  function animate(){
+    const dt = Math.min(clock.getDelta(), 0.05);
+
+    // движение игрока
+    if(controls.isLocked){
+      const speed = 36; // юнитов/сек
+      camera.getWorldDirection(tmpForward);
+      tmpForward.y = 0; tmpForward.normalize();
+      tmpRight.copy(tmpForward).cross(up).normalize();
+
+      let move = new THREE.Vector3();
+      if(keys.w) move.add(tmpForward);
+      if(keys.s) move.sub(tmpForward);
+      if(keys.a) move.sub(tmpRight);
+      if(keys.d) move.add(tmpRight);
+      if(move.lengthSq()>0){ move.normalize().multiplyScalar(speed*dt); }
+
+      const p = controls.getObject().position;
+      nextPos.copy(p).add(move);
+      clampToWorld(nextPos);
+      collideSpheres(nextPos, 0.8);
+
+      // «прилипание» к земле по высоте рельефа
+      const h = getHeight(nextPos.x, nextPos.z);
+      nextPos.y = h + EYE_HEIGHT;
+
+      controls.getObject().position.copy(nextPos);
+    }
+
+    // вращение кристаллов + проверка сбора
+    for(let i=crystals.length-1;i>=0;i--){
+      const c = crystals[i];
+      c.rotation.y += dt * 1.2;
+      if(c.position.distanceTo(controls.getObject().position) < 2.0){
+        scene.remove(c); crystals.splice(i,1);
+        score++; scoreEl.textContent = String(score);
+        toast('+1 кристалл');
+        if(score===totalCrystals) youWin();
+      }
+    }
+
+    // обновление врага
+    updateEnemy(dt);
+
+    // рендер
+    if(bloomEnabled){
+      composer.render();
+    }else{
+      renderer.render(scene, camera);
+    }
+
+    // FPS (редко обновляем)
+    const t = performance.now();
+    if(t - lastFpsUpdate > 300){
+      fpsEl.textContent = String(Math.round(1/dt));
+      lastFpsUpdate = t;
+    }
+
+    requestAnimationFrame(animate);
+  }
+  requestAnimationFrame(animate);
+
+  // размеры окна
+  window.addEventListener('resize', ()=>{
+    camera.aspect = window.innerWidth/window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    composer.setSize(window.innerWidth, window.innerHeight);
+    bloomPass.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  </script>
+</body>
+</html>
